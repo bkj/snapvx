@@ -36,9 +36,8 @@ from functools import partial
 from scipy.sparse import lil_matrix
 
 import dask
-import dask.bag as db
-from dask import delayed
 from dask.multiprocessing import get
+from dask.optimize import cull, inline, inline_functions
 
 import __builtin__
 
@@ -261,7 +260,7 @@ class TGraphVX(TUNGraph):
         def pluck(x, i):
             return x[i]
         
-        for iter_ in range(10):
+        for iter_ in range(5):
             print("building graph: iter", iter_)
             
             # --
@@ -339,10 +338,15 @@ class TGraphVX(TUNGraph):
                     1
                 )
         
+        
+        outputs = filter(lambda x: x[0] in ('node_vals', 'edge_z', 'edge_u') and x[-1] == 4, dsk.keys())
+        dsk, dependencies = cull(dsk, outputs)
+        dsk = inline(dsk, dependencies=dependencies)
+        dsk = inline_functions(dsk, outputs, [pluck, robust_solve, fmt, admm_u], dependencies=dependencies)
+        
         print("time to build", time() - t)
         t = time()
-        collect_all = filter(lambda x: x[0] in ('node_vals', 'edge_z', 'edge_u') and x[-1] == 9, dsk.keys())
-        all_vals = dict(zip(collect_all, get(dsk, collect_all)))
+        all_vals = dict(zip(outputs, get(dsk, outputs)))
         print("time to compute", time() - t)
         
         for i in range(5):
@@ -355,17 +359,17 @@ class TGraphVX(TUNGraph):
             print(json.dumps(stats))
         
         # Clean up
-        for entry in node_list:
-            self.node_values[entry['nid']] = node_vals[entry['idx']]
+        # for entry in node_list:
+        #     self.node_values[entry['nid']] = node_vals[entry['idx']]
         
-        self.complete = iter_ <= maxIters
-        self.value = self.GetTotalProblemValue()
+        # self.complete = iter_ <= maxIters
+        # self.value = self.GetTotalProblemValue()
     
-    def __CheckConvergence(self, dsk_vals, A, A_tr, edge_z_old, rho, e_abs, e_rel):
+    def __CheckConvergence(self, vals, A, A_tr, edge_z_old, rho, e_abs, e_rel):
         
-        node_vals_keys = sorted(filter(lambda x: x[0] == 'node_vals', dsk_vals.keys()), key=lambda x: x[1])
-        edge_z_keys    = sorted(filter(lambda x: x[0] == 'edge_z', dsk_vals.keys()), key=lambda x: x[1])
-        edge_u_keys    = sorted(filter(lambda x: x[0] == 'edge_u', dsk_vals.keys()), key=lambda x: x[1])
+        node_vals_keys = sorted(filter(lambda x: x[0] == 'node_vals', vals.keys()), key=lambda x: x[1])
+        edge_z_keys    = sorted(filter(lambda x: x[0] == 'edge_z', vals.keys()), key=lambda x: x[1])
+        edge_u_keys    = sorted(filter(lambda x: x[0] == 'edge_u', vals.keys()), key=lambda x: x[1])
         
         node   = np.hstack([dsk_vals[k] for k in node_vals_keys])
         edge_z = np.hstack([dsk_vals[k] for k in edge_z_keys])
