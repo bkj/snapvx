@@ -257,11 +257,11 @@ class TGraphVX(TUNGraph):
         
         dsk = {}
         
+        def pluck(x, i):
+            return x[i]
+        
         for iter_ in range(5):
-            print("iter:", iter_)
-            
-            def pluck(x, i):
-                return x[i]
+            print("building graph: iter", iter_)
             
             # --
             # admm_x
@@ -338,8 +338,11 @@ class TGraphVX(TUNGraph):
                     1
                 )
         
+        print("time to build", time() - t)
+        t = time()
         collect_all = filter(lambda x: x[0] in ('node_vals', 'edge_z', 'edge_u'), dsk.keys())
         all_vals = dict(zip(collect_all, get(dsk, collect_all)))
+        print("time to compute", time() - t)
         
         for i in range(5):
             vals = dict([(k, v) for k,v in all_vals.items() if k[-1] == i])
