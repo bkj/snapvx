@@ -142,7 +142,6 @@ class TGraphVX(TUNGraph):
     
     def __SolveADMM(self, numProcessors, rho, maxIters, eps_abs, eps_rel, verbose):
         global node_vals, edge_z_vals, edge_u_vals
-        global getValue
         
         manager = multiprocessing.Manager()
         node_vals = manager.dict()
@@ -220,6 +219,13 @@ class TGraphVX(TUNGraph):
                 "idx_ji" : idx_ji,
             })
         
+        for edge in edge_list:
+            print({
+                "eid" : edge['eid'],
+                "idx_ij" : edge['idx_ij'],
+                "idx_ji" : edge['idx_ji'],
+            })
+        
         edge_info = dict([(e['eid'], e) for e in edge_list])
         
         A = lil_matrix((n_edgevars, n_nodevars), dtype=np.int8)
@@ -240,11 +246,10 @@ class TGraphVX(TUNGraph):
         node_list = []
         for nid, entry in node_info.iteritems():
             for neighbor_id in entry["neighbor_ids"]:
-                indices = ("idx_ij", "idx_ij") if nid < neighbor_id else ("idx_ji", "idx_ji")
                 einfo = edge_info[self.__GetEdgeTup(nid, neighbor_id)]
                 entry['edges'].append((
-                    einfo[indices[0]],
-                    einfo[indices[1]]
+                    einfo["idx_ij" if nid < neighbor_id else "idx_ji"],
+                    einfo["idx_ij" if nid < neighbor_id else "idx_ji"],
                 ))
             
             node_list.append(entry)
@@ -271,7 +276,7 @@ class TGraphVX(TUNGraph):
         
         # Clean up
         for entry in node_list:
-            self.node_values[entry['nid']] = getValue(node_vals, entry['idx'], entry['size'])
+            self.node_values[entry['nid']] = node_vals[entry['idx']]
         
         self.complete = iter_ <= maxIters
         self.value = self.GetTotalProblemValue()
@@ -437,71 +442,88 @@ class TGraphVX(TUNGraph):
 ## =================================== ## 
 ## ADMM Global Variables and Functions ##
 
-def getValue(shared, idx, length):
-    try:
-        return np.array(shared[idx])
-    except:
-        return np.zeros(length)
+def fmt(val):
+    return np.asarray(val).squeeze()
 
 
-def setValue(shared, idx, val):
-    shared[idx] = np.asarray(val).squeeze()
 
-
-def writeObjective(shared, idx, objective, variables):
-    for v in objective.variables():
-        for (varID, varName, var, offset) in variables:
-            if varID == v.id:
-                setValue(shared, idx + offset, v.value)
-                break
-
-
-def ADMM_x(node, rho):
+def ADMM_x(node, rho=1.0):
     norms = 0
     
+    (node_var_id, _, node_var, _) = node["variables"][0]
+    
     for zi, ui in node["edges"]:
-        for (varID, varName, var, offset) in node["variables"]:
-            z = getValue(edge_z_vals, zi + offset, var.size[0])
-            u = getValue(edge_u_vals, ui + offset, var.size[0])
-            norms += square(norm(var - z + u))
+        z = edge_z_vals.get(zi, np.zeros(node_var.size[0]))
+        u = edge_u_vals.get(ui, np.zeros(node_var.size[0]))
+        norms += square(norm(node_var - z + u))
     
     objective = Minimize(node["objectives"] + (rho / 2) * norms)
     problem = Problem(objective, node["constraints"])
     robust_solve(problem)
     
-    writeObjective(node_vals, node["idx"], objective, node["variables"])
+    res = dict([(v.id, v.value) for v in objective.variables()])
+    node_vals[node['idx']] = fmt(res[node_var_id])
 
 
-def ADMM_z(edge, rho):
-    norms = 0
+def ADMM_z(edge, x_i, u_ij, x_j, u_ji, rho=1.0):
     
-    for (varID, varName, var, offset) in edge["vars_i"]:
-        x_i = getValue(node_vals, edge["idx_i"] + offset, var.size[0])
-        u_ij = getValue(edge_u_vals, edge["idx_ij"] + offset, var.size[0])
-        norms += square(norm(x_i - var + u_ij))
+    (var_i_id, _, var_i, _) = edge["vars_i"][0]
+    # x_i  = node_vals.get(edge["idx_i"], np.zeros(var_i.size[0]))
+    # u_ij = edge_u_vals.get(edge["idx_ij"], np.zeros(var_i.size[0]))
     
-    for (varID, varName, var, offset) in edge["vars_j"]:
-        x_j = getValue(node_vals, edge["idx_j"] + offset, var.size[0])
-        u_ji = getValue(edge_u_vals, edge["idx_ji"] + offset, var.size[0])
-        norms += square(norm(x_j - var + u_ji))
+    (var_j_id, _, var_j, _) = edge["vars_j"][0]
+    # x_j  = node_vals.get(edge["idx_j"], np.zeros(var_j.size[0]))
+    # u_ji = edge_u_vals.get(edge["idx_ji"], np.zeros(var_j.size[0]))
+    
+    norms = square(norm(x_i - var_i + u_ij)) + square(norm(x_j - var_j + u_ji))
     
     objective = Minimize(edge["objectives"] + (rho / 2) * norms)
     problem = Problem(objective, edge["constraints"])
     robust_solve(problem)
     
-    writeObjective(edge_z_vals, edge["idx_ij"], objective, edge["vars_i"])
-    writeObjective(edge_z_vals, edge["idx_ji"], objective, edge["vars_j"])
+    res = dict([(v.id, v.value) for v in objective.variables()])
+    # edge_z_vals[edge["idx_ij"]] = fmt(res[var_i_id])
+    # edge_z_vals[edge["idx_ji"]] = fmt(res[var_j_id])
+    
+    return (
+        (
+            edge["idx_ij"],
+            fmt(res[var_i_id]),
+        ),
+        (
+            edge["idx_ji"],
+            fmt(res[var_j_id])
+        )
+    )
+    
 
+# def ADMM_u(edge):
+#     edge_u_vals[edge["idx_ij"]] = fmt(
+#         edge_u_vals.get(edge["idx_ij"], np.zeros(edge["size_i"])) +
+#         node_vals[edge["idx_i"]] - edge_z_vals[edge["idx_ij"]]
+#     )
+    
+#     edge_u_vals[edge["idx_ji"]] = fmt(
+#         edge_u_vals.get(edge["idx_ji"], np.zeros(edge["size_j"])) +
+#         node_vals[edge["idx_j"]] -
+#         edge_z_vals[edge["idx_ji"]]
+#     )
 
 def ADMM_u(edge):
-    setValue(edge_u_vals, edge["idx_ij"], (
-        getValue(edge_u_vals, edge["idx_ij"], edge["size_i"]) +
-        getValue(node_vals, edge["idx_i"], edge["size_i"]) -
-        getValue(edge_z_vals, edge["idx_ij"], edge["size_i"])
-    ))
-    
-    setValue(edge_u_vals, edge["idx_ji"], (
-        getValue(edge_u_vals, edge["idx_ji"], edge["size_j"]) +
-        getValue(node_vals, edge["idx_j"], edge["size_j"]) -
-        getValue(edge_z_vals, edge["idx_ji"], edge["size_j"])
-    ))
+    return (
+        (
+            edge["idx_ij"],
+            fmt(
+                edge_u_vals.get(edge["idx_ij"], np.zeros(edge["size_i"])) +
+                node_vals[edge["idx_i"]] - edge_z_vals[edge["idx_ij"]]
+            )
+        ),
+        (
+            edge["idx_ji"], 
+            fmt(
+                edge_u_vals.get(edge["idx_ji"], np.zeros(edge["size_j"])) +
+                node_vals[edge["idx_j"]] -
+                edge_z_vals[edge["idx_ji"]]
+            )
+        ),
+    )
