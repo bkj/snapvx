@@ -138,6 +138,7 @@ class TGraphVX(TUNGraph):
                     val = np.array([var.value])
                 else:
                     val = np.array(var.value).reshape(-1,)
+                
                 if value is None:
                     value = val
                 else:
@@ -260,7 +261,7 @@ class TGraphVX(TUNGraph):
         def pluck(x, i):
             return x[i]
         
-        for iter_ in range(5):
+        for iter_ in range(10):
             print("building graph: iter", iter_)
             
             # --
@@ -340,7 +341,7 @@ class TGraphVX(TUNGraph):
         
         print("time to build", time() - t)
         t = time()
-        collect_all = filter(lambda x: x[0] in ('node_vals', 'edge_z', 'edge_u'), dsk.keys())
+        collect_all = filter(lambda x: x[0] in ('node_vals', 'edge_z', 'edge_u') and x[-1] == 9, dsk.keys())
         all_vals = dict(zip(collect_all, get(dsk, collect_all)))
         print("time to compute", time() - t)
         
