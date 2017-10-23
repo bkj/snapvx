@@ -151,58 +151,56 @@ class TGraphVX(TUNGraph):
         # Set up nodes
         
         node_info = {}
-        length = 0
+        n_nodevars = 0
         for ni in self.Nodes():
             nid = ni.GetId()
             
-            obj       = self.node_objectives[nid]
-            variables = self.node_variables[nid]
-            con       = self.node_constraints[nid]
+            objectives  = self.node_objectives[nid]
+            variables   = self.node_variables[nid]
+            constraints = self.node_constraints[nid]
             
             neighbor_ids = [ni.GetNbrNId(j) for j in xrange(ni.GetDeg())]
             for neighbor_id in neighbor_ids:
                 etup = self.__GetEdgeTup(nid, neighbor_id)
-                con += self.edge_constraints[etup]
+                constraints += self.edge_constraints[etup]
             
             size = sum([var.size[0] for (_, _, var, _) in variables])
             node_info[nid] = {
                 "nid"          : nid,
-                "objective"    : obj,
+                "objectives"   : objectives,
                 "variables"    : variables,
-                "con"          : con,
-                "ind"          : length,
+                "constraints"  : constraints,
+                "idx"          : n_nodevars,
                 "size"         : size,
                 "neighbor_ids" : neighbor_ids,
                 "edges"        : [],
             }
-            length += size
-        
-        x_length = length
+            n_nodevars += size
         
         # --
         # Set up edges
         
         edge_list = []
         edge_info = {}
-        length = 0
+        n_edgevars = 0
         for ei in self.Edges():
             etup = self.__GetEdgeTup(ei.GetSrcNId(), ei.GetDstNId())
             
             node_i = node_info[etup[0]]
             node_j = node_info[etup[1]]
             
-            ind_zij = length
-            ind_uij = length
-            length += node_i["size"]
+            idx_zij = n_edgevars
+            idx_uij = n_edgevars
+            n_edgevars += node_i["size"]
             
-            ind_zji = length
-            ind_uji = length
-            length += node_j["size"]
+            idx_zji = n_edgevars
+            idx_uji = n_edgevars
+            n_edgevars += node_j["size"]
             
             tup = {
-                "eid"     : etup,
-                "obj"     : self.edge_objectives[etup],
-                "con"     : (
+                "eid"         : etup,
+                "objectives"  : self.edge_objectives[etup],
+                "constraints" : (
                     self.node_constraints[etup[0]] +
                     self.node_constraints[etup[1]] +
                     self.edge_constraints[etup]
@@ -210,22 +208,20 @@ class TGraphVX(TUNGraph):
                 
                 "vars_i"  : node_i["variables"],
                 "size_i"  : node_i["size"],
-                "ind_i"   : node_i["ind"],
-                "ind_zij" : ind_zij,
-                "ind_uij" : ind_uij,
+                "idx_i"   : node_i["idx"],
+                "idx_zij" : idx_zij,
+                "idx_uij" : idx_uij,
                 
                 "vars_j"  : node_j["variables"],
                 "size_j"  : node_j["size"],
-                "ind_j"   : node_j["ind"],
-                "ind_zji" : ind_zji,
-                "ind_uji" : ind_uji,
+                "idx_j"   : node_j["idx"],
+                "idx_zji" : idx_zji,
+                "idx_uji" : idx_uji,
             }
             edge_list.append(tup)
             edge_info[etup] = tup
         
-        z_length = length
-        
-        A = lil_matrix((z_length, x_length), dtype=np.int8)
+        A = lil_matrix((n_edgevars, n_nodevars), dtype=np.int8)
         for ei in self.Edges():
             etup = self.__GetEdgeTup(ei.GetSrcNId(), ei.GetDstNId())
             info_edge = edge_info[etup]
@@ -233,19 +229,21 @@ class TGraphVX(TUNGraph):
             node_j = node_info[etup[1]]
             
             for offset in xrange(node_i["size"]):
-                row = info_edge["ind_zij"] + offset
-                col = node_i["ind"] + offset
+                row = info_edge["idx_zij"] + offset
+                col = node_i["idx"] + offset
                 A[row, col] = 1
             
             for offset in xrange(node_j["size"]):
-                row = info_edge["ind_zji"] + offset
-                col = node_j["ind"] + offset
+                row = info_edge["idx_zji"] + offset
+                col = node_j["idx"] + offset
                 A[row, col] = 1
+        
+        A_tr = A.transpose()
         
         node_list = []
         for nid, entry in node_info.iteritems():
             for neighbor_id in entry["neighbor_ids"]:
-                indices = ("ind_zij", "ind_uij") if nid < neighbor_id else ("ind_zji", "ind_uji")
+                indices = ("idx_zij", "idx_uij") if nid < neighbor_id else ("idx_zji", "idx_uji")
                 einfo = edge_info[self.__GetEdgeTup(nid, neighbor_id)]
                 entry['edges'].append((
                     einfo[indices[0]],
@@ -255,7 +253,7 @@ class TGraphVX(TUNGraph):
             node_list.append(entry)
         
         pool = multiprocessing.Pool(num_processors)
-        z_old = None
+        edge_z_old = None
         for iter_ in range(maxIters):
             print 'iteration=%d' % iter_
             
@@ -263,26 +261,45 @@ class TGraphVX(TUNGraph):
             pool.map(partial(ADMM_z, rho=rho), edge_list)
             pool.map(ADMM_u, edge_list)
             
-            x = np.hstack([node_vals[k] for k in sorted(node_vals.keys())])
-            z = np.hstack([edge_z_vals[k] for k in sorted(edge_z_vals.keys())])
-            u = np.hstack([edge_u_vals[k] for k in sorted(edge_u_vals.keys())])
-            
-            conv = self.__CheckConvergence(A, x, z, z_old, u, rho, x_length, z_length, eps_abs, eps_rel)
-            print(conv)
-            if conv['stop']:
+            stats, stop, edge_z_old = self.__CheckConvergence(A, A_tr, edge_z_old, rho, eps_abs, eps_rel)
+            print(stats)
+            if stop:
                 break
-            
-            z_old = z
         
         pool.close()
         pool.join()
         
+        # Clean up
         for entry in node_list:
-            self.node_values[entry['nid']] = getValue(node_vals, entry['ind'], entry['size'])
+            self.node_values[entry['nid']] = getValue(node_vals, entry['idx'], entry['size'])
         
         self.complete = iter_ <= maxIters
         self.value = self.GetTotalProblemValue()
+    
+    def __CheckConvergence(self, A, A_tr, edge_z_old, rho, e_abs, e_rel):
+        node   = np.hstack([node_vals[k] for k in sorted(node_vals.keys())])
+        edge_z = np.hstack([edge_z_vals[k] for k in sorted(edge_z_vals.keys())])
+        edge_u = np.hstack([edge_u_vals[k] for k in sorted(edge_u_vals.keys())])
         
+        Ax = A.dot(node)
+        if edge_z_old is not None:
+            s = rho * A_tr.dot(edge_z - edge_z_old)
+        else:
+            s = rho * A_tr.dot(edge_z)
+        
+        e_pri = np.sqrt(A.shape[1]) * e_abs + e_rel * max(np.linalg.norm(Ax), np.linalg.norm(edge_z)) + .0001
+        e_dual = np.sqrt(A.shape[0]) * e_abs + e_rel * np.linalg.norm(rho * A_tr.dot(edge_u)) + .0001
+        
+        res_pri = np.linalg.norm(Ax - edge_z)
+        res_dual = np.linalg.norm(s)
+        
+        return {
+            "res_pri"  : res_pri,
+            "e_pri"    : e_pri,
+            "res_dual" : res_dual,
+            "e_dual"   : e_dual,
+        }, (res_pri <= e_pri) and (res_dual <= e_dual), edge_z
+    
     def GetTotalProblemValue(self):
         result = 0.0
         for ni in self.Nodes():
@@ -298,29 +315,6 @@ class TGraphVX(TUNGraph):
             result += self.edge_objectives[etup].value
         
         return result
-    
-    def __CheckConvergence(self, A, x, z, z_old, u, rho, p, n, e_abs, e_rel):
-        A_tr = A.transpose()
-        
-        Ax = A.dot(x)
-        if z_old is not None:
-            s = rho * A_tr.dot(z - z_old)
-        else:
-            s = rho * A_tr.dot(z)
-        
-        e_pri = np.sqrt(p) * e_abs + e_rel * max(np.linalg.norm(Ax), np.linalg.norm(z)) + .0001
-        e_dual = np.sqrt(n) * e_abs + e_rel * np.linalg.norm(rho * A_tr.dot(u)) + .0001
-        
-        res_pri = np.linalg.norm(Ax - z)
-        res_dual = np.linalg.norm(s)
-        
-        return {
-            "stop" : (res_pri <= e_pri) and (res_dual <= e_dual),
-            "res_pri" : res_pri,
-            "e_pri" : e_pri,
-            "res_dual" : res_dual,
-            "e_dual" : e_dual,
-        }
         
     # API to get node Variable value after solving with ADMM.
     def GetNodeValue(self, NId, Name):
@@ -462,62 +456,53 @@ def writeObjective(shared, idx, objective, variables):
                 break
 
 
-def ADMM_x(entry, rho):
-    variables = entry["variables"]
+def ADMM_x(node, rho):
     norms = 0
     
-    for zi, ui in entry["edges"]:
-        for (varID, varName, var, offset) in variables:
+    for zi, ui in node["edges"]:
+        for (varID, varName, var, offset) in node["variables"]:
             z = getValue(edge_z_vals, zi + offset, var.size[0])
             u = getValue(edge_u_vals, ui + offset, var.size[0])
             norms += square(norm(var - z + u))
     
-    objective = entry["objective"] + (rho / 2) * norms
-    objective = Minimize(objective)
-    constraints = entry["con"]
-    problem = Problem(objective, constraints)
-    
+    objective = Minimize(node["objectives"] + (rho / 2) * norms)
+    problem = Problem(objective, node["constraints"])
     robust_solve(problem)
     
-    writeObjective(node_vals, entry["ind"], objective, variables)
+    writeObjective(node_vals, node["idx"], objective, node["variables"])
     return None
 
 
-def ADMM_z(entry, rho):
-    objective = entry["obj"]
-    constraints = entry["con"]
+def ADMM_z(edge, rho):
     norms = 0
     
-    variables_i = entry["vars_i"]
-    for (varID, varName, var, offset) in variables_i:
-        x_i = getValue(node_vals, entry["ind_i"] + offset, var.size[0])
-        u_ij = getValue(edge_u_vals, entry["ind_uij"] + offset, var.size[0])
+    for (varID, varName, var, offset) in edge["vars_i"]:
+        x_i = getValue(node_vals, edge["idx_i"] + offset, var.size[0])
+        u_ij = getValue(edge_u_vals, edge["idx_uij"] + offset, var.size[0])
         norms += square(norm(x_i - var + u_ij))
     
-    variables_j = entry["vars_j"]
-    for (varID, varName, var, offset) in variables_j:
-        x_j = getValue(node_vals, entry["ind_j"] + offset, var.size[0])
-        u_ji = getValue(edge_u_vals, entry["ind_uji"] + offset, var.size[0])
+    for (varID, varName, var, offset) in edge["vars_j"]:
+        x_j = getValue(node_vals, edge["idx_j"] + offset, var.size[0])
+        u_ji = getValue(edge_u_vals, edge["idx_uji"] + offset, var.size[0])
         norms += square(norm(x_j - var + u_ji))
     
-    objective = Minimize(objective + (rho / 2) * norms)
-    problem = Problem(objective, constraints)
-    
+    objective = Minimize(edge["objectives"] + (rho / 2) * norms)
+    problem = Problem(objective, edge["constraints"])
     robust_solve(problem)
     
-    writeObjective(edge_z_vals, entry["ind_zij"], objective, variables_i)
-    writeObjective(edge_z_vals, entry["ind_zji"], objective, variables_j)
+    writeObjective(edge_z_vals, edge["idx_zij"], objective, edge["vars_i"])
+    writeObjective(edge_z_vals, edge["idx_zji"], objective, edge["vars_j"])
 
 
-def ADMM_u(entry):
-    setValue(edge_u_vals, entry["ind_uij"], (
-        getValue(edge_u_vals, entry["ind_uij"], entry["size_i"]) +
-        getValue(node_vals, entry["ind_i"], entry["size_i"]) -
-        getValue(edge_z_vals, entry["ind_zij"], entry["size_i"])
+def ADMM_u(edge):
+    setValue(edge_u_vals, edge["idx_uij"], (
+        getValue(edge_u_vals, edge["idx_uij"], edge["size_i"]) +
+        getValue(node_vals, edge["idx_i"], edge["size_i"]) -
+        getValue(edge_z_vals, edge["idx_zij"], edge["size_i"])
     ))
     
-    setValue(edge_u_vals, entry["ind_uji"], (
-        getValue(edge_u_vals, entry["ind_uji"], entry["size_j"]) +
-        getValue(node_vals, entry["ind_j"], entry["size_j"]) -
-        getValue(edge_z_vals, entry["ind_zji"], entry["size_j"])
+    setValue(edge_u_vals, edge["idx_uji"], (
+        getValue(edge_u_vals, edge["idx_uji"], edge["size_j"]) +
+        getValue(node_vals, edge["idx_j"], edge["size_j"]) -
+        getValue(edge_z_vals, edge["idx_zji"], edge["size_j"])
     ))
