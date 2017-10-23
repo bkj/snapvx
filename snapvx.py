@@ -447,7 +447,7 @@ def fmt(val):
 
 
 
-def ADMM_x(node, rho=1.0):
+def ADMM_x(node, rho):
     norms = 0
     
     (node_var_id, _, node_var, _) = node["variables"][0]
@@ -465,15 +465,15 @@ def ADMM_x(node, rho=1.0):
     node_vals[node['idx']] = fmt(res[node_var_id])
 
 
-def ADMM_z(edge, x_i, u_ij, x_j, u_ji, rho=1.0):
+def ADMM_z(edge, rho):
     
     (var_i_id, _, var_i, _) = edge["vars_i"][0]
-    # x_i  = node_vals.get(edge["idx_i"], np.zeros(var_i.size[0]))
-    # u_ij = edge_u_vals.get(edge["idx_ij"], np.zeros(var_i.size[0]))
+    x_i  = node_vals.get(edge["idx_i"], np.zeros(var_i.size[0]))
+    u_ij = edge_u_vals.get(edge["idx_ij"], np.zeros(var_i.size[0]))
     
     (var_j_id, _, var_j, _) = edge["vars_j"][0]
-    # x_j  = node_vals.get(edge["idx_j"], np.zeros(var_j.size[0]))
-    # u_ji = edge_u_vals.get(edge["idx_ji"], np.zeros(var_j.size[0]))
+    x_j  = node_vals.get(edge["idx_j"], np.zeros(var_j.size[0]))
+    u_ji = edge_u_vals.get(edge["idx_ji"], np.zeros(var_j.size[0]))
     
     norms = square(norm(x_i - var_i + u_ij)) + square(norm(x_j - var_j + u_ji))
     
@@ -482,48 +482,18 @@ def ADMM_z(edge, x_i, u_ij, x_j, u_ji, rho=1.0):
     robust_solve(problem)
     
     res = dict([(v.id, v.value) for v in objective.variables()])
-    # edge_z_vals[edge["idx_ij"]] = fmt(res[var_i_id])
-    # edge_z_vals[edge["idx_ji"]] = fmt(res[var_j_id])
-    
-    return (
-        (
-            edge["idx_ij"],
-            fmt(res[var_i_id]),
-        ),
-        (
-            edge["idx_ji"],
-            fmt(res[var_j_id])
-        )
-    )
-    
+    edge_z_vals[edge["idx_ij"]] = fmt(res[var_i_id])
+    edge_z_vals[edge["idx_ji"]] = fmt(res[var_j_id])
 
-# def ADMM_u(edge):
-#     edge_u_vals[edge["idx_ij"]] = fmt(
-#         edge_u_vals.get(edge["idx_ij"], np.zeros(edge["size_i"])) +
-#         node_vals[edge["idx_i"]] - edge_z_vals[edge["idx_ij"]]
-#     )
-    
-#     edge_u_vals[edge["idx_ji"]] = fmt(
-#         edge_u_vals.get(edge["idx_ji"], np.zeros(edge["size_j"])) +
-#         node_vals[edge["idx_j"]] -
-#         edge_z_vals[edge["idx_ji"]]
-#     )
 
 def ADMM_u(edge):
-    return (
-        (
-            edge["idx_ij"],
-            fmt(
-                edge_u_vals.get(edge["idx_ij"], np.zeros(edge["size_i"])) +
-                node_vals[edge["idx_i"]] - edge_z_vals[edge["idx_ij"]]
-            )
-        ),
-        (
-            edge["idx_ji"], 
-            fmt(
-                edge_u_vals.get(edge["idx_ji"], np.zeros(edge["size_j"])) +
-                node_vals[edge["idx_j"]] -
-                edge_z_vals[edge["idx_ji"]]
-            )
-        ),
+    edge_u_vals[edge["idx_ij"]] = fmt(
+        edge_u_vals.get(edge["idx_ij"], np.zeros(edge["size_i"])) +
+        node_vals[edge["idx_i"]] - edge_z_vals[edge["idx_ij"]]
+    )
+    
+    edge_u_vals[edge["idx_ji"]] = fmt(
+        edge_u_vals.get(edge["idx_ji"], np.zeros(edge["size_j"])) +
+        node_vals[edge["idx_j"]] -
+        edge_z_vals[edge["idx_ji"]]
     )
