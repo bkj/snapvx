@@ -21,11 +21,14 @@
 # OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+from __future__ import print_function
+
 from snap import *
 from cvxpy import *
 
 import os
 import sys
+from time import time
 import numpy as np
 import multiprocessing
 from functools import partial
@@ -40,11 +43,11 @@ def robust_solve(problem):
     try:
         problem.solve()
     except SolverError:
-        print "ECOS error: using SCS for x update (1"
+        print("ECOS error: using SCS for x update (1)", file=sys.stderr)
         problem.solve(solver=SCS)
     
     if problem.status in [INFEASIBLE_INACCURATE, UNBOUNDED_INACCURATE]:
-        print "ECOS error: using SCS for x update (2)"
+        print("ECOS error: using SCS for x update (2)", file=sys.stderr)
         problem.solve(solver=SCS)
 
 
@@ -252,17 +255,20 @@ class TGraphVX(TUNGraph):
             
             node_list.append(entry)
         
+        t = time()
         pool = multiprocessing.Pool(num_processors)
         edge_z_old = None
         for iter_ in range(maxIters):
-            print 'iteration=%d' % iter_
-            
             pool.map(partial(ADMM_x, rho=rho), node_list)
             pool.map(partial(ADMM_z, rho=rho), edge_list)
             pool.map(ADMM_u, edge_list)
             
             stats, stop, edge_z_old = self.__CheckConvergence(A, A_tr, edge_z_old, rho, eps_abs, eps_rel)
-            print(stats)
+            stats.update({
+                "iter" : iter_,
+                "time" : time() - t,
+            })
+            print(json.dumps(stats))
             if stop:
                 break
         
