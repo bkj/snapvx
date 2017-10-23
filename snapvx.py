@@ -522,8 +522,6 @@ class TGraphVX(TUNGraph):
         
         return d
 
-
-
 ## =================================== ## 
 ## ADMM Global Variables and Functions ##
 
@@ -552,10 +550,7 @@ def admm_z(edge, x_i, u_ij, x_j, u_ji, rho=1.0):
     robust_solve(problem)
     
     res = dict([(v.id, v.value) for v in objective.variables()])
-    return (
-        fmt(res[var_i_id]),
-        fmt(res[var_j_id]),
-    )
+    return fmt(res[var_i_id]), fmt(res[var_j_id])
 
 def admm_u(uidx_ij, uidx_ji, node_i, node_j, zidx_ij, zidx_ji):
     return fmt(uidx_ij + node_i - zidx_ij), fmt(uidx_ji + node_j - zidx_ji)
