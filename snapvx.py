@@ -264,15 +264,14 @@ class TGraphVX(TUNGraph):
             pool.map(partial(ADMM_z, rho=rho), edge_list)
             pool.map(ADMM_u, edge_list)
             
-            if not iter_ % 10:
-                stats, stop, edge_z_old = self.__CheckConvergence(A, A_tr, edge_z_old, rho, eps_abs, eps_rel)
-                stats.update({
-                    "iter" : iter_,
-                    "time" : time() - t,
-                })
-                print(json.dumps(stats))
-                if stop:
-                    break
+            stats, stop, edge_z_old = self.__CheckConvergence(A, A_tr, edge_z_old, rho, eps_abs, eps_rel)
+            stats.update({
+                "iter" : iter_,
+                "time" : time() - t,
+            })
+            print(json.dumps(stats))
+            if stop:
+                break
         
         pool.close()
         pool.join()
