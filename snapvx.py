@@ -28,6 +28,7 @@ from cvxpy import *
 
 import os
 import sys
+import json
 from time import time
 import numpy as np
 import multiprocessing
@@ -192,15 +193,13 @@ class TGraphVX(TUNGraph):
             node_i = node_info[etup[0]]
             node_j = node_info[etup[1]]
             
-            idx_zij = n_edgevars
-            idx_uij = n_edgevars
+            idx_ij = n_edgevars
             n_edgevars += node_i["size"]
             
-            idx_zji = n_edgevars
-            idx_uji = n_edgevars
+            idx_ji = n_edgevars
             n_edgevars += node_j["size"]
             
-            tup = {
+            edge_list.append({
                 "eid"         : etup,
                 "objectives"  : self.edge_objectives[etup],
                 "constraints" : (
@@ -212,17 +211,16 @@ class TGraphVX(TUNGraph):
                 "vars_i"  : node_i["variables"],
                 "size_i"  : node_i["size"],
                 "idx_i"   : node_i["idx"],
-                "idx_zij" : idx_zij,
-                "idx_uij" : idx_uij,
                 
                 "vars_j"  : node_j["variables"],
                 "size_j"  : node_j["size"],
                 "idx_j"   : node_j["idx"],
-                "idx_zji" : idx_zji,
-                "idx_uji" : idx_uji,
-            }
-            edge_list.append(tup)
-            edge_info[etup] = tup
+                
+                "idx_ij" : idx_ij,
+                "idx_ji" : idx_ji,
+            })
+        
+        edge_info = dict([(e['eid'], e) for e in edge_list])
         
         A = lil_matrix((n_edgevars, n_nodevars), dtype=np.int8)
         for ei in self.Edges():
@@ -232,21 +230,17 @@ class TGraphVX(TUNGraph):
             node_j = node_info[etup[1]]
             
             for offset in xrange(node_i["size"]):
-                row = info_edge["idx_zij"] + offset
-                col = node_i["idx"] + offset
-                A[row, col] = 1
+                A[info_edge["idx_ij"] + offset, node_i["idx"] + offset] = 1
             
             for offset in xrange(node_j["size"]):
-                row = info_edge["idx_zji"] + offset
-                col = node_j["idx"] + offset
-                A[row, col] = 1
+                A[info_edge["idx_ji"] + offset, node_j["idx"] + offset] = 1
         
         A_tr = A.transpose()
         
         node_list = []
         for nid, entry in node_info.iteritems():
             for neighbor_id in entry["neighbor_ids"]:
-                indices = ("idx_zij", "idx_uij") if nid < neighbor_id else ("idx_zji", "idx_uji")
+                indices = ("idx_ij", "idx_ij") if nid < neighbor_id else ("idx_ji", "idx_ji")
                 einfo = edge_info[self.__GetEdgeTup(nid, neighbor_id)]
                 entry['edges'].append((
                     einfo[indices[0]],
@@ -476,7 +470,6 @@ def ADMM_x(node, rho):
     robust_solve(problem)
     
     writeObjective(node_vals, node["idx"], objective, node["variables"])
-    return None
 
 
 def ADMM_z(edge, rho):
@@ -484,31 +477,31 @@ def ADMM_z(edge, rho):
     
     for (varID, varName, var, offset) in edge["vars_i"]:
         x_i = getValue(node_vals, edge["idx_i"] + offset, var.size[0])
-        u_ij = getValue(edge_u_vals, edge["idx_uij"] + offset, var.size[0])
+        u_ij = getValue(edge_u_vals, edge["idx_ij"] + offset, var.size[0])
         norms += square(norm(x_i - var + u_ij))
     
     for (varID, varName, var, offset) in edge["vars_j"]:
         x_j = getValue(node_vals, edge["idx_j"] + offset, var.size[0])
-        u_ji = getValue(edge_u_vals, edge["idx_uji"] + offset, var.size[0])
+        u_ji = getValue(edge_u_vals, edge["idx_ji"] + offset, var.size[0])
         norms += square(norm(x_j - var + u_ji))
     
     objective = Minimize(edge["objectives"] + (rho / 2) * norms)
     problem = Problem(objective, edge["constraints"])
     robust_solve(problem)
     
-    writeObjective(edge_z_vals, edge["idx_zij"], objective, edge["vars_i"])
-    writeObjective(edge_z_vals, edge["idx_zji"], objective, edge["vars_j"])
+    writeObjective(edge_z_vals, edge["idx_ij"], objective, edge["vars_i"])
+    writeObjective(edge_z_vals, edge["idx_ji"], objective, edge["vars_j"])
 
 
 def ADMM_u(edge):
-    setValue(edge_u_vals, edge["idx_uij"], (
-        getValue(edge_u_vals, edge["idx_uij"], edge["size_i"]) +
+    setValue(edge_u_vals, edge["idx_ij"], (
+        getValue(edge_u_vals, edge["idx_ij"], edge["size_i"]) +
         getValue(node_vals, edge["idx_i"], edge["size_i"]) -
-        getValue(edge_z_vals, edge["idx_zij"], edge["size_i"])
+        getValue(edge_z_vals, edge["idx_ij"], edge["size_i"])
     ))
     
-    setValue(edge_u_vals, edge["idx_uji"], (
-        getValue(edge_u_vals, edge["idx_uji"], edge["size_j"]) +
+    setValue(edge_u_vals, edge["idx_ji"], (
+        getValue(edge_u_vals, edge["idx_ji"], edge["size_j"]) +
         getValue(node_vals, edge["idx_j"], edge["size_j"]) -
-        getValue(edge_z_vals, edge["idx_zji"], edge["size_j"])
+        getValue(edge_z_vals, edge["idx_ji"], edge["size_j"])
     ))
