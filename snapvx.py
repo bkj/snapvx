@@ -35,6 +35,11 @@ import multiprocessing
 from functools import partial
 from scipy.sparse import lil_matrix
 
+import dask
+import dask.bag as db
+from dask import delayed
+from dask.multiprocessing import get
+
 import __builtin__
 
 # --
@@ -143,11 +148,6 @@ class TGraphVX(TUNGraph):
     def __SolveADMM(self, numProcessors, rho, maxIters, eps_abs, eps_rel, verbose):
         global node_vals, edge_z_vals, edge_u_vals
         
-        manager = multiprocessing.Manager()
-        node_vals = manager.dict()
-        edge_z_vals = manager.dict()
-        edge_u_vals = manager.dict()
-        
         num_processors = multiprocessing.cpu_count() if numProcessors <= 0 else numProcessors
         
         # --
@@ -219,13 +219,6 @@ class TGraphVX(TUNGraph):
                 "idx_ji" : idx_ji,
             })
         
-        for edge in edge_list:
-            print({
-                "eid" : edge['eid'],
-                "idx_ij" : edge['idx_ij'],
-                "idx_ji" : edge['idx_ji'],
-            })
-        
         edge_info = dict([(e['eid'], e) for e in edge_list])
         
         A = lil_matrix((n_edgevars, n_nodevars), dtype=np.int8)
@@ -257,22 +250,105 @@ class TGraphVX(TUNGraph):
         t = time()
         pool = multiprocessing.Pool(num_processors)
         edge_z_old = None
-        for iter_ in range(maxIters):
-            pool.map(partial(ADMM_x, rho=rho), node_list)
-            pool.map(partial(ADMM_z, rho=rho), edge_list)
-            pool.map(ADMM_u, edge_list)
+        
+        node_vals   = []
+        edge_z_vals = []
+        edge_u_vals = []
+        
+        dsk = {}
+        
+        for iter_ in range(5):
+            print("iter:", iter_)
             
-            stats, stop, edge_z_old = self.__CheckConvergence(A, A_tr, edge_z_old, rho, eps_abs, eps_rel)
+            def pluck(x, i):
+                return x[i]
+            
+            # --
+            # admm_x
+            for node in node_list:
+                node_var = node["variables"][0][2]
+                node_edges = []
+                for zi, ui in node["edges"]:
+                    if iter_ == 0:
+                        dsk[('edge_z', zi, -1)] = np.zeros(node_var.size[0])
+                        dsk[('edge_u', ui, -1)] = np.zeros(node_var.size[0])
+                    
+                    node_edges.append([
+                        ('edge_z', zi, iter_ -1),
+                        ('edge_u', ui, iter_ -1),
+                    ])
+                
+                dsk[('node', node['idx'], iter_)] = node
+                dsk[('node_vals', node['idx'], iter_)] = (
+                    admm_x, 
+                    ('node', node['idx'], iter_),
+                    node_edges,
+                )
+            
+            # --
+            # admm_z
+            for edge in edge_list:
+                (var_i_id, _, var_i, _) = edge["vars_i"][0]
+                (var_j_id, _, var_j, _) = edge["vars_j"][0]
+                
+                if iter_ == 0:
+                    dsk[('edge_u', edge["idx_ij"], -1)] = np.zeros(var_i.size[0])
+                    dsk[('edge_u', edge["idx_ji"], -1)] = np.zeros(var_j.size[0])
+                
+                dsk[('edge', edge['eid'], iter_)] = edge
+                dsk[('edge_z_tmp', (edge['idx_ij'], edge['idx_ji']), iter_)] = (
+                    admm_z, 
+                    ('edge',      edge['eid'], iter_),
+                    ('node_vals', edge["idx_i"], iter_),
+                    ('edge_u',    edge["idx_ij"], iter_ - 1),
+                    ('node_vals', edge["idx_j"], iter_),
+                    ('edge_u',    edge["idx_ji"], iter_ - 1),
+                )
+                dsk[('edge_z', edge['idx_ij'], iter_)] = (
+                    pluck,
+                    ('edge_z_tmp', (edge['idx_ij'], edge['idx_ji']), iter_),
+                    0
+                )
+                dsk[('edge_z', edge['idx_ji'], iter_)] = (
+                    pluck,
+                    ('edge_z_tmp', (edge['idx_ij'], edge['idx_ji']), iter_),
+                    1
+                )
+            
+            # --
+            # admm_u
+            for edge in edge_list:
+                dsk[('edge_u_tmp', (edge['idx_ij'], edge['idx_ji']), iter_)] = (
+                    admm_u, 
+                    ('edge_u',    edge['idx_ij'], iter_ - 1),
+                    ('edge_u',    edge['idx_ji'], iter_ - 1),
+                    ('node_vals', edge['idx_i'], iter_),
+                    ('node_vals', edge['idx_j'], iter_),
+                    ('edge_z',    edge['idx_ij'], iter_),
+                    ('edge_z',    edge['idx_ji'], iter_),
+                )
+                dsk[('edge_u', edge['idx_ij'], iter_)] = (
+                    pluck,
+                    ('edge_u_tmp', (edge['idx_ij'], edge['idx_ji']), iter_),
+                    0
+                )
+                dsk[('edge_u', edge['idx_ji'], iter_)] = (
+                    pluck,
+                    ('edge_u_tmp', (edge['idx_ij'], edge['idx_ji']), iter_),
+                    1
+                )
+        
+        collect_all = filter(lambda x: x[0] in ('node_vals', 'edge_z', 'edge_u'), dsk.keys())
+        all_vals = dict(zip(collect_all, get(dsk, collect_all)))
+        
+        for i in range(5):
+            vals = dict([(k, v) for k,v in all_vals.items() if k[-1] == i])
+            stats, stop, edge_z_old = self.__CheckConvergence(vals, A, A_tr, edge_z_old, rho, eps_abs, eps_rel)
             stats.update({
                 "iter" : iter_,
                 "time" : time() - t,
             })
             print(json.dumps(stats))
-            if stop:
-                break
-        
-        pool.close()
-        pool.join()
         
         # Clean up
         for entry in node_list:
@@ -281,10 +357,15 @@ class TGraphVX(TUNGraph):
         self.complete = iter_ <= maxIters
         self.value = self.GetTotalProblemValue()
     
-    def __CheckConvergence(self, A, A_tr, edge_z_old, rho, e_abs, e_rel):
-        node   = np.hstack([node_vals[k] for k in sorted(node_vals.keys())])
-        edge_z = np.hstack([edge_z_vals[k] for k in sorted(edge_z_vals.keys())])
-        edge_u = np.hstack([edge_u_vals[k] for k in sorted(edge_u_vals.keys())])
+    def __CheckConvergence(self, dsk_vals, A, A_tr, edge_z_old, rho, e_abs, e_rel):
+        
+        node_vals_keys = sorted(filter(lambda x: x[0] == 'node_vals', dsk_vals.keys()), key=lambda x: x[1])
+        edge_z_keys    = sorted(filter(lambda x: x[0] == 'edge_z', dsk_vals.keys()), key=lambda x: x[1])
+        edge_u_keys    = sorted(filter(lambda x: x[0] == 'edge_u', dsk_vals.keys()), key=lambda x: x[1])
+        
+        node   = np.hstack([dsk_vals[k] for k in node_vals_keys])
+        edge_z = np.hstack([dsk_vals[k] for k in edge_z_keys])
+        edge_u = np.hstack([dsk_vals[k] for k in edge_u_keys])
         
         Ax = A.dot(node)
         if edge_z_old is not None:
@@ -445,55 +526,32 @@ class TGraphVX(TUNGraph):
 def fmt(val):
     return np.asarray(val).squeeze()
 
-
-
-def ADMM_x(node, rho):
-    norms = 0
-    
+def admm_x(node, node_edges, rho=1.0):
     (node_var_id, _, node_var, _) = node["variables"][0]
-    
-    for zi, ui in node["edges"]:
-        z = edge_z_vals.get(zi, np.zeros(node_var.size[0]))
-        u = edge_u_vals.get(ui, np.zeros(node_var.size[0]))
-        norms += square(norm(node_var - z + u))
+    norms = sum([square(norm(node_var - z + u)) for z, u in node_edges])
     
     objective = Minimize(node["objectives"] + (rho / 2) * norms)
     problem = Problem(objective, node["constraints"])
     robust_solve(problem)
     
     res = dict([(v.id, v.value) for v in objective.variables()])
-    node_vals[node['idx']] = fmt(res[node_var_id])
+    return fmt(res[node_var_id])
 
 
-def ADMM_z(edge, rho):
-    
+def admm_z(edge, x_i, u_ij, x_j, u_ji, rho=1.0):
     (var_i_id, _, var_i, _) = edge["vars_i"][0]
-    x_i  = node_vals.get(edge["idx_i"], np.zeros(var_i.size[0]))
-    u_ij = edge_u_vals.get(edge["idx_ij"], np.zeros(var_i.size[0]))
-    
     (var_j_id, _, var_j, _) = edge["vars_j"][0]
-    x_j  = node_vals.get(edge["idx_j"], np.zeros(var_j.size[0]))
-    u_ji = edge_u_vals.get(edge["idx_ji"], np.zeros(var_j.size[0]))
     
     norms = square(norm(x_i - var_i + u_ij)) + square(norm(x_j - var_j + u_ji))
-    
     objective = Minimize(edge["objectives"] + (rho / 2) * norms)
     problem = Problem(objective, edge["constraints"])
     robust_solve(problem)
     
     res = dict([(v.id, v.value) for v in objective.variables()])
-    edge_z_vals[edge["idx_ij"]] = fmt(res[var_i_id])
-    edge_z_vals[edge["idx_ji"]] = fmt(res[var_j_id])
-
-
-def ADMM_u(edge):
-    edge_u_vals[edge["idx_ij"]] = fmt(
-        edge_u_vals.get(edge["idx_ij"], np.zeros(edge["size_i"])) +
-        node_vals[edge["idx_i"]] - edge_z_vals[edge["idx_ij"]]
+    return (
+        fmt(res[var_i_id]),
+        fmt(res[var_j_id]),
     )
-    
-    edge_u_vals[edge["idx_ji"]] = fmt(
-        edge_u_vals.get(edge["idx_ji"], np.zeros(edge["size_j"])) +
-        node_vals[edge["idx_j"]] -
-        edge_z_vals[edge["idx_ji"]]
-    )
+
+def admm_u(uidx_ij, uidx_ji, node_i, node_j, zidx_ij, zidx_ji):
+    return fmt(uidx_ij + node_i - zidx_ij), fmt(uidx_ji + node_j - zidx_ji)
