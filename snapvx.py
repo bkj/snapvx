@@ -260,7 +260,7 @@ class TGraphVX(TUNGraph):
         def pluck(x, i):
             return x[i]
         
-        for iter_ in range(5):
+        for iter_ in range(30):
             print("building graph: iter", iter_)
             
             # --
@@ -339,7 +339,7 @@ class TGraphVX(TUNGraph):
                 )
         
         
-        outputs = filter(lambda x: x[0] in ('node_vals', 'edge_z', 'edge_u') and x[-1] == 4, dsk.keys())
+        outputs = filter(lambda x: x[0] in ('node_vals', 'edge_z', 'edge_u') and x[-1] == 29, dsk.keys())
         dsk, dependencies = cull(dsk, outputs)
         dsk = inline(dsk, dependencies=dependencies)
         dsk = inline_functions(dsk, outputs, [pluck, robust_solve, fmt, admm_u], dependencies=dependencies)
@@ -349,7 +349,7 @@ class TGraphVX(TUNGraph):
         all_vals = dict(zip(outputs, get(dsk, outputs)))
         print("time to compute", time() - t)
         
-        for i in range(5):
+        for i in range(30):
             vals = dict([(k, v) for k,v in all_vals.items() if k[-1] == i])
             stats, stop, edge_z_old = self.__CheckConvergence(vals, A, A_tr, edge_z_old, rho, eps_abs, eps_rel)
             stats.update({
@@ -533,6 +533,7 @@ def fmt(val):
     return np.asarray(val).squeeze()
 
 def admm_x(node, node_edges, rho=1.0):
+    print('admm_x')
     (node_var_id, _, node_var, _) = node["variables"][0]
     norms = sum([square(norm(node_var - z + u)) for z, u in node_edges])
     
@@ -555,6 +556,7 @@ def admm_z(edge, x_i, u_ij, x_j, u_ji, rho=1.0):
     
     res = dict([(v.id, v.value) for v in objective.variables()])
     return fmt(res[var_i_id]), fmt(res[var_j_id])
+
 
 def admm_u(uidx_ij, uidx_ji, node_i, node_j, zidx_ij, zidx_ji):
     return fmt(uidx_ij + node_i - zidx_ij), fmt(uidx_ji + node_j - zidx_ji)
